@@ -1,6 +1,6 @@
 module github.com/eduard256/ozon-mcp
 
-go 1.25.5
+go 1.22
 
 require github.com/go-rod/rod v0.116.2
 
