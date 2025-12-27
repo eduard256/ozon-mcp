@@ -53,8 +53,20 @@ def fetch_page(url: str, output_file: str = "/tmp/page.html") -> None:
                 print("Antibot passed!")
                 break
 
-        # Additional wait for content
+        # Wait for product cards to load (for search/catalog pages)
+        print("Waiting for content to load...")
+        try:
+            page.wait_for_selector("article.product-card, .product-page, .catalog-page", timeout=10000)
+            print("Content loaded!")
+        except Exception:
+            print("No product cards found, continuing...")
+
+        # Additional wait for dynamic content
         page.wait_for_timeout(3000)
+
+        # Scroll to load more content
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+        page.wait_for_timeout(2000)
 
         html = page.content()
 
