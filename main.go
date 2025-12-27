@@ -11,17 +11,18 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/go-rod/stealth"
 )
 
 type Product struct {
-	Name     string   `json:"name"`
-	Price    string   `json:"price"`
-	OldPrice string   `json:"old_price,omitempty"`
-	Link     string   `json:"link"`
-	Image    string   `json:"image,omitempty"`
-	Rating   string   `json:"rating,omitempty"`
-	Reviews  string   `json:"reviews,omitempty"`
-	Delivery string   `json:"delivery,omitempty"`
+	Name     string `json:"name"`
+	Price    string `json:"price"`
+	OldPrice string `json:"old_price,omitempty"`
+	Link     string `json:"link"`
+	Image    string `json:"image,omitempty"`
+	Rating   string `json:"rating,omitempty"`
+	Reviews  string `json:"reviews,omitempty"`
+	Delivery string `json:"delivery,omitempty"`
 }
 
 type SearchResult struct {
@@ -36,7 +37,6 @@ type OzonParser struct {
 }
 
 func NewOzonParser(debug bool) (*OzonParser, error) {
-	// Find or download browser
 	path, _ := launcher.LookPath()
 	if path == "" {
 		log.Println("Browser not found, downloading...")
@@ -48,8 +48,9 @@ func NewOzonParser(debug bool) (*OzonParser, error) {
 		Set("disable-gpu").
 		Set("no-sandbox").
 		Set("disable-dev-shm-usage").
-		Set("disable-web-security").
-		Set("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36").
+		Set("disable-blink-features", "AutomationControlled").
+		Set("disable-infobars").
+		Set("window-size", "1920,1080").
 		MustLaunch()
 
 	browser := rod.New().ControlURL(u).MustConnect()
@@ -66,6 +67,19 @@ func (p *OzonParser) Close() {
 	}
 }
 
+func (p *OzonParser) createStealthPage(url string) *rod.Page {
+	page := stealth.MustPage(p.browser)
+
+	// Set realistic viewport
+	page.MustSetViewport(1920, 1080, 1, false)
+
+	// Navigate
+	page.MustNavigate(url)
+	page.MustWaitLoad()
+
+	return page
+}
+
 func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error) {
 	url := fmt.Sprintf("https://www.ozon.ru/search/?text=%s&from_global=true", query)
 
@@ -73,39 +87,53 @@ func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error
 		log.Println("Opening:", url)
 	}
 
-	page := p.browser.MustPage(url)
+	page := p.createStealthPage(url)
 	defer page.MustClose()
-
-	// Set viewport
-	page.MustSetViewport(1920, 1080, 1, false)
-
-	// Wait for page load
-	page.MustWaitLoad()
 
 	if p.debug {
 		log.Println("Page loaded, waiting for content...")
 	}
 
-	// Wait a bit for JS to render
-	time.Sleep(3 * time.Second)
+	// Initial wait for page to render
+	time.Sleep(5 * time.Second)
 
 	html := page.MustHTML()
 
-	// Check for antibot
-	if strings.Contains(html, "Antibot") || strings.Contains(html, "antibot") {
+	// Check for antibot/access restricted
+	if strings.Contains(html, "Доступ ограничен") || strings.Contains(html, "Antibot") {
 		if p.debug {
-			log.Println("Antibot detected, waiting...")
+			log.Println("Access restricted detected, waiting and retrying...")
 		}
+
+		// Try clicking reload button if exists
+		if btn, err := page.Element("#reload-button"); err == nil {
+			btn.MustClick()
+			time.Sleep(5 * time.Second)
+		}
+
+		// Wait longer
 		time.Sleep(10 * time.Second)
 		html = page.MustHTML()
+
+		// Still blocked?
+		if strings.Contains(html, "Доступ ограничен") {
+			if p.debug {
+				log.Println("Still blocked after retry")
+				os.WriteFile("/tmp/ozon_debug.html", []byte(html), 0644)
+			}
+			return &SearchResult{Query: query, Products: []Product{}}, fmt.Errorf("access restricted by Ozon")
+		}
 	}
 
 	if p.debug {
 		log.Println("Page length:", len(html))
 	}
 
-	// Try to scroll to load more products
-	page.Mouse.Scroll(0, 1000, 1)
+	// Scroll to load more products
+	for i := 0; i < 3; i++ {
+		page.Mouse.Scroll(0, 500, 1)
+		time.Sleep(500 * time.Millisecond)
+	}
 	time.Sleep(2 * time.Second)
 
 	result := &SearchResult{
@@ -113,37 +141,24 @@ func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error
 		Products: []Product{},
 	}
 
-	// Try different selectors for product cards
-	selectors := []string{
-		"div[data-widget='searchResultsV2'] > div > div",
-		"div.widget-search-result-container > div > div",
-		"div.j8t > div",
-		"a[href*='/product/']",
-	}
+	// Find all product links
+	products, _ := page.Elements("a[href*='/product/']")
 
-	var products rod.Elements
-	for _, sel := range selectors {
-		products, _ = page.Elements(sel)
-		if len(products) > 0 {
-			if p.debug {
-				log.Printf("Found %d elements with selector: %s", len(products), sel)
-			}
-			break
-		}
+	if p.debug {
+		log.Printf("Found %d product links", len(products))
 	}
 
 	if len(products) == 0 {
-		// Try to extract from page JSON
 		if p.debug {
-			log.Println("No products found via selectors, trying JSON extraction...")
-			// Save HTML for debugging
 			os.WriteFile("/tmp/ozon_debug.html", []byte(html), 0644)
 			log.Println("Debug HTML saved to /tmp/ozon_debug.html")
 		}
 		return result, nil
 	}
 
+	seen := make(map[string]bool)
 	count := 0
+
 	for _, elem := range products {
 		if count >= maxProducts {
 			break
@@ -152,62 +167,63 @@ func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error
 		product := Product{}
 
 		// Get link
-		if link, err := elem.Attribute("href"); err == nil && link != nil {
-			product.Link = *link
-			if !strings.HasPrefix(product.Link, "http") {
-				product.Link = "https://www.ozon.ru" + product.Link
-			}
-		} else {
-			// Try to find link inside element
-			if linkEl, err := elem.Element("a[href*='/product/']"); err == nil {
-				if href, err := linkEl.Attribute("href"); err == nil && href != nil {
-					product.Link = "https://www.ozon.ru" + *href
-				}
-			}
-		}
-
-		// Skip if no link (not a product card)
-		if product.Link == "" || !strings.Contains(product.Link, "/product/") {
+		href, err := elem.Attribute("href")
+		if err != nil || href == nil {
 			continue
 		}
 
-		// Get name
-		nameSelectors := []string{"span.tsBody500Medium", "span[class*='tsBody']", "span.tile-name"}
-		for _, sel := range nameSelectors {
-			if nameEl, err := elem.Element(sel); err == nil {
-				if text, err := nameEl.Text(); err == nil && text != "" {
-					product.Name = strings.TrimSpace(text)
-					break
-				}
-			}
+		link := *href
+		if !strings.HasPrefix(link, "http") {
+			link = "https://www.ozon.ru" + link
 		}
 
-		// Get price
-		priceSelectors := []string{"span.tsHeadline500Medium", "span[class*='price']", "span.c3"}
-		for _, sel := range priceSelectors {
-			if priceEl, err := elem.Element(sel); err == nil {
-				if text, err := priceEl.Text(); err == nil && text != "" {
-					product.Price = strings.TrimSpace(text)
-					break
-				}
+		// Skip non-product links and duplicates
+		if !strings.Contains(link, "/product/") {
+			continue
+		}
+
+		// Extract product ID from URL to avoid duplicates
+		parts := strings.Split(link, "/product/")
+		if len(parts) < 2 {
+			continue
+		}
+		productPath := strings.Split(parts[1], "?")[0]
+		productPath = strings.Split(productPath, "/")[0]
+
+		if seen[productPath] {
+			continue
+		}
+		seen[productPath] = true
+
+		product.Link = link
+
+		// Try to get parent card element for more info
+		parent := elem
+
+		// Get text content - try to find name
+		text, _ := parent.Text()
+		lines := strings.Split(strings.TrimSpace(text), "\n")
+
+		// First meaningful line is usually the name
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if len(line) > 10 && !strings.Contains(line, "₽") && product.Name == "" {
+				product.Name = line
+			}
+			// Look for price
+			if strings.Contains(line, "₽") && product.Price == "" {
+				product.Price = line
 			}
 		}
 
 		// Get image
-		if imgEl, err := elem.Element("img"); err == nil {
+		if imgEl, err := parent.Element("img"); err == nil {
 			if src, err := imgEl.Attribute("src"); err == nil && src != nil {
 				product.Image = *src
 			}
 		}
 
-		// Get rating
-		if ratingEl, err := elem.Element("span[class*='rating'], div[class*='star']"); err == nil {
-			if text, err := ratingEl.Text(); err == nil {
-				product.Rating = strings.TrimSpace(text)
-			}
-		}
-
-		if product.Name != "" || product.Price != "" {
+		if product.Name != "" || product.Link != "" {
 			result.Products = append(result.Products, product)
 			count++
 		}
@@ -222,19 +238,15 @@ func (p *OzonParser) GetProduct(url string) (*Product, error) {
 		log.Println("Opening product:", url)
 	}
 
-	page := p.browser.MustPage(url)
+	page := p.createStealthPage(url)
 	defer page.MustClose()
 
-	page.MustSetViewport(1920, 1080, 1, false)
-	page.MustWaitLoad()
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	html := page.MustHTML()
 
-	// Check for antibot
-	if strings.Contains(html, "Antibot") {
-		time.Sleep(10 * time.Second)
-		html = page.MustHTML()
+	if strings.Contains(html, "Доступ ограничен") {
+		return nil, fmt.Errorf("access restricted by Ozon")
 	}
 
 	product := &Product{Link: url}
@@ -246,15 +258,14 @@ func (p *OzonParser) GetProduct(url string) (*Product, error) {
 		}
 	}
 
-	// Get price - try multiple selectors
+	// Get price
 	priceSelectors := []string{
-		"span[data-widget='webPrice'] span",
 		"div[data-widget='webPrice'] span",
-		"span.price-number",
+		"span[class*='price']",
 	}
 	for _, sel := range priceSelectors {
 		if priceEl, err := page.Element(sel); err == nil {
-			if text, err := priceEl.Text(); err == nil && text != "" {
+			if text, err := priceEl.Text(); err == nil && text != "" && strings.Contains(text, "₽") {
 				product.Price = strings.TrimSpace(text)
 				break
 			}
@@ -269,7 +280,7 @@ func (p *OzonParser) GetProduct(url string) (*Product, error) {
 	}
 
 	// Get rating
-	if ratingEl, err := page.Element("div[data-widget='webReviewRating']"); err == nil {
+	if ratingEl, err := page.Element("div[data-widget='webReviewProductScore']"); err == nil {
 		if text, err := ratingEl.Text(); err == nil {
 			product.Rating = strings.TrimSpace(text)
 		}
@@ -279,12 +290,10 @@ func (p *OzonParser) GetProduct(url string) (*Product, error) {
 }
 
 func (p *OzonParser) GetScreenshot(url string) ([]byte, error) {
-	page := p.browser.MustPage(url)
+	page := p.createStealthPage(url)
 	defer page.MustClose()
 
-	page.MustSetViewport(1920, 1080, 1, false)
-	page.MustWaitLoad()
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	screenshot, err := page.Screenshot(true, &proto.PageCaptureScreenshot{
 		Format:  proto.PageCaptureScreenshotFormatPng,
@@ -311,7 +320,7 @@ func main() {
 	log.Println("Searching for:", query)
 	result, err := parser.Search(query, 10)
 	if err != nil {
-		log.Fatal("Search failed:", err)
+		log.Println("Search error:", err)
 	}
 
 	jsonData, _ := json.MarshalIndent(result, "", "  ")
