@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "wb-mcp": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "wb-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

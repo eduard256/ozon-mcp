@@ -41,5 +41,8 @@ RUN playwright install chromium && playwright install-deps chromium
 # Copy server code
 COPY server.py .
 
-# Run MCP server via stdio
-CMD ["python", "server.py"]
+# Expose SSE port
+EXPOSE 8000
+
+# Run MCP server via SSE by default (can override with CMD)
+CMD ["python", "server.py", "sse"]
