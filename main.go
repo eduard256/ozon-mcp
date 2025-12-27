@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"strings"
 	"time"
@@ -43,14 +44,25 @@ func NewOzonParser(debug bool) (*OzonParser, error) {
 		path = launcher.NewBrowser().MustGet()
 	}
 
+	// Use new headless mode which is harder to detect
 	u := launcher.New().Bin(path).
-		Headless(true).
+		Headless(false). // Will use Xvfb if available, otherwise old headless
+		Set("headless", "new"). // New headless mode
 		Set("disable-gpu").
 		Set("no-sandbox").
 		Set("disable-dev-shm-usage").
 		Set("disable-blink-features", "AutomationControlled").
 		Set("disable-infobars").
+		Set("disable-extensions").
+		Set("disable-plugins-discovery").
+		Set("disable-popup-blocking").
 		Set("window-size", "1920,1080").
+		Set("start-maximized").
+		Set("ignore-certificate-errors").
+		Set("allow-running-insecure-content").
+		Set("disable-web-security").
+		Set("lang", "ru-RU,ru").
+		Set("accept-lang", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7").
 		MustLaunch()
 
 	browser := rod.New().ControlURL(u).MustConnect()
@@ -67,17 +79,78 @@ func (p *OzonParser) Close() {
 	}
 }
 
+func randomDelay(min, max int) {
+	delay := time.Duration(min+rand.Intn(max-min)) * time.Millisecond
+	time.Sleep(delay)
+}
+
 func (p *OzonParser) createStealthPage(url string) *rod.Page {
 	page := stealth.MustPage(p.browser)
 
 	// Set realistic viewport
 	page.MustSetViewport(1920, 1080, 1, false)
 
-	// Navigate
+	// Add extra evasions
+	page.MustEvalOnNewDocument(`
+		// Overwrite the 'webdriver' property
+		Object.defineProperty(navigator, 'webdriver', {
+			get: () => undefined
+		});
+
+		// Overwrite the 'plugins' property
+		Object.defineProperty(navigator, 'plugins', {
+			get: () => [1, 2, 3, 4, 5]
+		});
+
+		// Overwrite the 'languages' property
+		Object.defineProperty(navigator, 'languages', {
+			get: () => ['ru-RU', 'ru', 'en-US', 'en']
+		});
+
+		// Mock permissions
+		const originalQuery = window.navigator.permissions.query;
+		window.navigator.permissions.query = (parameters) => (
+			parameters.name === 'notifications' ?
+				Promise.resolve({ state: Notification.permission }) :
+				originalQuery(parameters)
+		);
+
+		// Randomize canvas fingerprint slightly
+		const originalGetContext = HTMLCanvasElement.prototype.getContext;
+		HTMLCanvasElement.prototype.getContext = function(type, attributes) {
+			const context = originalGetContext.call(this, type, attributes);
+			if (type === '2d') {
+				const originalFillText = context.fillText;
+				context.fillText = function(...args) {
+					args[1] += Math.random() * 0.01;
+					return originalFillText.apply(this, args);
+				};
+			}
+			return context;
+		};
+	`)
+
+	// Navigate with random delay
+	randomDelay(500, 1500)
 	page.MustNavigate(url)
 	page.MustWaitLoad()
 
 	return page
+}
+
+func (p *OzonParser) simulateHuman(page *rod.Page) {
+	// Random mouse movements
+	for i := 0; i < 3; i++ {
+		x := 100 + rand.Intn(1700)
+		y := 100 + rand.Intn(800)
+		page.Mouse.MustMoveTo(float64(x), float64(y))
+		randomDelay(100, 300)
+	}
+
+	// Random scroll
+	scrollAmount := 200 + rand.Intn(400)
+	page.Mouse.MustScroll(0, float64(scrollAmount))
+	randomDelay(500, 1000)
 }
 
 func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error) {
@@ -91,31 +164,38 @@ func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error
 	defer page.MustClose()
 
 	if p.debug {
-		log.Println("Page loaded, waiting for content...")
+		log.Println("Page loaded, simulating human behavior...")
 	}
 
-	// Initial wait for page to render
-	time.Sleep(5 * time.Second)
+	// Simulate human behavior
+	p.simulateHuman(page)
+
+	// Wait for content
+	time.Sleep(3 * time.Second)
 
 	html := page.MustHTML()
 
 	// Check for antibot/access restricted
 	if strings.Contains(html, "Доступ ограничен") || strings.Contains(html, "Antibot") {
 		if p.debug {
-			log.Println("Access restricted detected, waiting and retrying...")
+			log.Println("Access restricted detected, trying to solve...")
 		}
 
-		// Try clicking reload button if exists
+		// More human-like behavior
+		p.simulateHuman(page)
+		p.simulateHuman(page)
+
+		// Try clicking reload button
 		if btn, err := page.Element("#reload-button"); err == nil {
+			randomDelay(1000, 2000)
 			btn.MustClick()
 			time.Sleep(5 * time.Second)
+			p.simulateHuman(page)
 		}
 
-		// Wait longer
 		time.Sleep(10 * time.Second)
 		html = page.MustHTML()
 
-		// Still blocked?
 		if strings.Contains(html, "Доступ ограничен") {
 			if p.debug {
 				log.Println("Still blocked after retry")
@@ -129,10 +209,11 @@ func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error
 		log.Println("Page length:", len(html))
 	}
 
-	// Scroll to load more products
-	for i := 0; i < 3; i++ {
-		page.Mouse.Scroll(0, 500, 1)
-		time.Sleep(500 * time.Millisecond)
+	// Scroll to load more products like a human
+	for i := 0; i < 5; i++ {
+		scrollAmount := 300 + rand.Intn(400)
+		page.Mouse.MustScroll(0, float64(scrollAmount))
+		randomDelay(800, 1500)
 	}
 	time.Sleep(2 * time.Second)
 
@@ -166,7 +247,6 @@ func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error
 
 		product := Product{}
 
-		// Get link
 		href, err := elem.Attribute("href")
 		if err != nil || href == nil {
 			continue
@@ -177,12 +257,10 @@ func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error
 			link = "https://www.ozon.ru" + link
 		}
 
-		// Skip non-product links and duplicates
 		if !strings.Contains(link, "/product/") {
 			continue
 		}
 
-		// Extract product ID from URL to avoid duplicates
 		parts := strings.Split(link, "/product/")
 		if len(parts) < 2 {
 			continue
@@ -197,27 +275,21 @@ func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error
 
 		product.Link = link
 
-		// Try to get parent card element for more info
-		parent := elem
-
-		// Get text content - try to find name
-		text, _ := parent.Text()
+		// Get text content
+		text, _ := elem.Text()
 		lines := strings.Split(strings.TrimSpace(text), "\n")
 
-		// First meaningful line is usually the name
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if len(line) > 10 && !strings.Contains(line, "₽") && product.Name == "" {
 				product.Name = line
 			}
-			// Look for price
 			if strings.Contains(line, "₽") && product.Price == "" {
 				product.Price = line
 			}
 		}
 
-		// Get image
-		if imgEl, err := parent.Element("img"); err == nil {
+		if imgEl, err := elem.Element("img"); err == nil {
 			if src, err := imgEl.Attribute("src"); err == nil && src != nil {
 				product.Image = *src
 			}
@@ -241,7 +313,8 @@ func (p *OzonParser) GetProduct(url string) (*Product, error) {
 	page := p.createStealthPage(url)
 	defer page.MustClose()
 
-	time.Sleep(5 * time.Second)
+	p.simulateHuman(page)
+	time.Sleep(3 * time.Second)
 
 	html := page.MustHTML()
 
@@ -251,14 +324,12 @@ func (p *OzonParser) GetProduct(url string) (*Product, error) {
 
 	product := &Product{Link: url}
 
-	// Get title
 	if titleEl, err := page.Element("h1"); err == nil {
 		if text, err := titleEl.Text(); err == nil {
 			product.Name = strings.TrimSpace(text)
 		}
 	}
 
-	// Get price
 	priceSelectors := []string{
 		"div[data-widget='webPrice'] span",
 		"span[class*='price']",
@@ -272,14 +343,12 @@ func (p *OzonParser) GetProduct(url string) (*Product, error) {
 		}
 	}
 
-	// Get main image
 	if imgEl, err := page.Element("div[data-widget='webGallery'] img"); err == nil {
 		if src, err := imgEl.Attribute("src"); err == nil && src != nil {
 			product.Image = *src
 		}
 	}
 
-	// Get rating
 	if ratingEl, err := page.Element("div[data-widget='webReviewProductScore']"); err == nil {
 		if text, err := ratingEl.Text(); err == nil {
 			product.Rating = strings.TrimSpace(text)
@@ -293,7 +362,8 @@ func (p *OzonParser) GetScreenshot(url string) ([]byte, error) {
 	page := p.createStealthPage(url)
 	defer page.MustClose()
 
-	time.Sleep(5 * time.Second)
+	p.simulateHuman(page)
+	time.Sleep(3 * time.Second)
 
 	screenshot, err := page.Screenshot(true, &proto.PageCaptureScreenshot{
 		Format:  proto.PageCaptureScreenshotFormatPng,
@@ -304,6 +374,8 @@ func (p *OzonParser) GetScreenshot(url string) ([]byte, error) {
 }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	query := "iphone 15"
 	if len(os.Args) > 1 {
 		query = os.Args[1]
