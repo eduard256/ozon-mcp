@@ -44,25 +44,19 @@ func NewOzonParser(debug bool) (*OzonParser, error) {
 		path = launcher.NewBrowser().MustGet()
 	}
 
-	// Use new headless mode which is harder to detect
+	// Use mobile user agent to avoid detection
 	u := launcher.New().Bin(path).
-		Headless(false). // Will use Xvfb if available, otherwise old headless
-		Set("headless", "new"). // New headless mode
+		Headless(false).
+		Set("headless", "new").
 		Set("disable-gpu").
 		Set("no-sandbox").
 		Set("disable-dev-shm-usage").
 		Set("disable-blink-features", "AutomationControlled").
 		Set("disable-infobars").
 		Set("disable-extensions").
-		Set("disable-plugins-discovery").
-		Set("disable-popup-blocking").
-		Set("window-size", "1920,1080").
-		Set("start-maximized").
-		Set("ignore-certificate-errors").
-		Set("allow-running-insecure-content").
-		Set("disable-web-security").
+		Set("window-size", "414,896").
+		Set("user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1").
 		Set("lang", "ru-RU,ru").
-		Set("accept-lang", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7").
 		MustLaunch()
 
 	browser := rod.New().ControlURL(u).MustConnect()
@@ -87,8 +81,8 @@ func randomDelay(min, max int) {
 func (p *OzonParser) createStealthPage(url string) *rod.Page {
 	page := stealth.MustPage(p.browser)
 
-	// Set realistic viewport
-	page.MustSetViewport(1920, 1080, 1, false)
+	// Set mobile viewport
+	page.MustSetViewport(414, 896, 2, true)
 
 	// Add extra evasions
 	page.MustEvalOnNewDocument(`
@@ -154,7 +148,8 @@ func (p *OzonParser) simulateHuman(page *rod.Page) {
 }
 
 func (p *OzonParser) Search(query string, maxProducts int) (*SearchResult, error) {
-	url := fmt.Sprintf("https://www.ozon.ru/search/?text=%s&from_global=true", query)
+	// Try mobile version first - often has less protection
+	url := fmt.Sprintf("https://m.ozon.ru/search/?text=%s&from_global=true", query)
 
 	if p.debug {
 		log.Println("Opening:", url)
